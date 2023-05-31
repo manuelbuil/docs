@@ -1,201 +1,264 @@
 ---
-title: "Network Options"
-weight: 25
+title: Network Options
 ---
 
-import Tabs from '@theme/Tabs';
-import TabItem from '@theme/TabItem';
+RKE2 requires a CNI plugin to connect pods and services. The Canal CNI plugin is the default and has been supported since the beginning. Starting with RKE2 v1.21, there are two extra supported CNI plugins: Calico and Cilium. All CNI
+plugins get installed via a helm chart after the main components are up and running and can be customized by modifying the helm chart options.
 
-This page describes K3s network configuration options, including configuration or replacement of Flannel, and configuring IPv6.
+This page focuses on the network options available when setting up RKE2:
 
-> **Note:** Please reference the [Networking](../networking/networking.md) page for information about CoreDNS, Traefik, and the Service LB.
-
-## Flannel Options
-
-[Flannel](https://github.com/flannel-io/flannel/blob/master/README.md) is a lightweight provider of layer 3 network fabric that implements the Kubernetes Container Network Interface (CNI). It is what is commonly referred to as a CNI Plugin.
-
-* Flannel options can only be set on server nodes, and must be identical on all servers in the cluster.
-* The default backend for Flannel is `vxlan`. To enable encryption, use the `wireguard-native` backend.
-* Using `vxlan` on Rasperry Pi with recent versions of Ubuntu requires [additional preparation](../advanced/advanced.md#raspberry-pi).
-* Using `wireguard-native` as the Flannel backend may require additional modules on some Linux distributions. Please see the [WireGuard Install Guide](https://www.wireguard.com/install/) for details.
-  The WireGuard install steps will ensure the appropriate kernel modules are installed for your operating system.
-  You must ensure that WireGuard kernel modules are available on every node, both servers and agents, before attempting to use the WireGuard Flannel backend.
+- [Install a CNI plugin](#install-a-cni-plugin)
+- [Dual-stack configuration](#dual-stack-configuration)
+- [Using Multus](#using-multus)
 
 
-  CLI Flag and Value | Description
-  -------------------|------------
- `--flannel-ipv6-masq` | Apply masquerading rules to IPv6 traffic (default for IPv4). Only applies on dual-stack or IPv6-only clusters. Compatible with any Flannel backend other than `none`. |
- `--flannel-external-ip` | Use node external IP addresses as the destination for Flannel traffic, instead of internal IPs. Only applies when --node-external-ip is set on a node. |
- `--flannel-backend=vxlan` | Use VXLAN to encapsulate the packets. May require additional kernel modules on Raspberry Pi. |
- `--flannel-backend=host-gw` | Use IP routes to pod subnets via node IPs. Requires direct layer 2 connectivity between all nodes in the cluster. |
- `--flannel-backend=wireguard-native` | Use WireGuard to encapsulate and encrypt network traffic. May require additional kernel modules. |
- `--flannel-backend=ipsec` | Use strongSwan IPSec via the `swanctl` binary to encrypt network traffic. (Deprecated; will be removed in v1.27.0) |
- `--flannel-backend=wireguard` | Use WireGuard via the `wg` binary to encrypt network traffic. May require additional kernel modules and configuration. (Deprecated; will be removed in v1.26.0) |
- `--flannel-backend=none` | Disable Flannel entirely. |
+## Install a CNI plugin
 
-:::info Version Gate
+The next tabs inform how to deploy each CNI plugin and override the default options:
 
-K3s no longer includes strongSwan `swanctl` and `charon` binaries starting with the 2022-12 releases (v1.26.0+k3s1, v1.25.5+k3s1, v1.24.9+k3s1, v1.23.15+k3s1). Please install the correct packages on your node before upgrading to or installing these releases if you want to use the `ipsec` backend.
+=== "Canal CNI plugin"
+    Canal means using Flannel for inter-node traffic and Calico for intra-node traffic and network policies. By default, it will use vxlan encapsulation to create an overlay network among nodes. Canal is deployed by default in RKE2 and thus nothing must be configured to activate it. To override the default Canal options you should create a HelmChartConfig resource. The HelmChartConfig resource must match the name and namespace of its corresponding HelmChart. For example to override the flannel interface, you can apply the following config:
 
-:::
+    ```yaml
+    # /var/lib/rancher/rke2/server/manifests/rke2-canal-config.yaml
+    ---
+    apiVersion: helm.cattle.io/v1
+    kind: HelmChartConfig
+    metadata:
+      name: rke2-canal
+      namespace: kube-system
+    spec:
+      valuesContent: |-
+        flannel:
+          iface: "eth1"
+    ```
 
-### Migrating from `wireguard` or `ipsec` to `wireguard-native`
+    Starting with RKE2 v1.23 it is possible to use flannel's [wireguard backend](https://github.com/flannel-io/flannel/blob/master/Documentation/backends.md#wireguard) for in-kernel WireGuard encapsulation and encryption ([Users of kernels < 5.6 need to install a module](https://www.wireguard.com/install/)). This can be achieved using the following config:
+    
+    ```yaml
+    # /var/lib/rancher/rke2/server/manifests/rke2-canal-config.yaml
+    ---
+    apiVersion: helm.cattle.io/v1
+    kind: HelmChartConfig
+    metadata:
+      name: rke2-canal
+      namespace: kube-system
+    spec:
+      valuesContent: |-
+        flannel:
+          backend: "wireguard"
+    ```
 
-The legacy `wireguard` backend requires installation of the `wg` tool on the host. This backend will be removed in K3s v1.26, in favor of `wireguard-native` backend, which directly interfaces with the kernel.
+    After that, please restart the canal daemonset to use the newer config by executing: `kubectl rollout restart ds rke2-canal -n kube-system`    
 
-The legacy `ipsec` backend requires installation of the `swanctl` and `charon` binaries on the host. This backend will be removed in K3s v1.27, in favor of the `wireguard-native` backend.
+    For more information about the full options of the Canal config please refer to the [rke2-charts](https://github.com/rancher/rke2-charts/blob/main-source/packages/rke2-canal/charts/values.yaml).
 
-We recommend that users migrate to the new backend as soon as possible. The migration requires a short period of downtime while nodes come up with the new configuration. You should follow these two steps:
+    > **Note:** Canal requires the iptables or xtables-nft package to be installed on the node.
 
-1. Update the K3s config on all server nodes. If using config files, the `/etc/rancher/k3s/config.yaml` should include `flannel-backend: wireguard-native` instead of `flannel-backend: wireguard` or `flannel-backend: ipsec`. If you are configuring K3s via CLI flags in the systemd unit, the equivalent flags should be changed.
-2. Reboot all nodes, starting with the servers.
+    > **Warning:** Canal is currently not supported on clusters with Windows nodes.
 
-## Custom CNI
+    Please check [Known issues and Limitations](https://docs.rke2.io/known_issues/) if you experience IP allocation problems 
 
-Start K3s with `--flannel-backend=none` and install your CNI of choice. Most CNI plugins come with their own network policy engine, so it is recommended to set `--disable-network-policy` as well to avoid conflicts. IP Forwarding should be enabled for Canal and Calico; please reference the steps below.
+=== "Cilium CNI plugin"
+    Starting with RKE2 v1.21, Cilium can be deployed as the CNI plugin. To do so, pass `cilium` as the value of the `--cni` flag. To override the default options, please use a HelmChartConfig resource. The HelmChartConfig resource must match the name and namespace of its corresponding HelmChart. For example, to enable eni:
 
-<Tabs>
-<TabItem value="Canal" default>
+    ```yaml
+    # /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
+    ---
+    apiVersion: helm.cattle.io/v1
+    kind: HelmChartConfig
+    metadata:
+      name: rke2-cilium
+      namespace: kube-system
+    spec:
+      valuesContent: |-
+        eni:
+          enabled: true
+    ```
 
-Visit the [Project Calico Docs](https://docs.tigera.io/calico/) website. Follow the steps to install Canal. Modify the Canal YAML so that IP forwarding is allowed in the `container_settings` section, for example:
+    For more information about values available in the Cilium chart, please refer to the [rke2-charts repository](https://github.com/rancher/rke2-charts/blob/main/charts/rke2-cilium/rke2-cilium/1.12.301/values.yaml)
 
+    Cilium includes advanced features to fully replace kube-proxy and implement the routing of services using eBPF instead of iptables. It is not recommended to replace kube-proxy by Cilium if your kernel is not v5.8 or newer, as important bug fixes and features will be missing. To activate this mode, deploy rke2 with the flag `--disable-kube-proxy` and the following cilium configuration:
+
+    ```yaml
+    # /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
+    ---
+    apiVersion: helm.cattle.io/v1
+    kind: HelmChartConfig
+    metadata:
+      name: rke2-cilium
+      namespace: kube-system
+    spec:
+      valuesContent: |-
+        kubeProxyReplacement: strict
+        k8sServiceHost: <KUBE_API_SERVER_IP>
+        k8sServicePort: <KUBE_API_SERVER_PORT>
+        cni:
+          chainingMode: "none"
+    ```
+
+    For more information, please check the [upstream docs](https://docs.cilium.io/en/v1.12/gettingstarted/kubeproxy-free/)
+
+    > **Warning:** Cilium is currently not supported in the Windows installation of RKE2
+
+=== "Calico CNI plugin"
+    Starting with RKE2 v1.21, Calico can be deployed as the CNI plugin. To do so, pass `calico` as the value of the `--cni` flag. To override the default options, please use a HelmChartConfig resource. The HelmChartConfig resource must match the name and namespace of its corresponding HelmChart. For example, to change the mtu:
+
+    ```yaml
+    # /var/lib/rancher/rke2/server/manifests/rke2-calico-config.yaml
+    ---
+    apiVersion: helm.cattle.io/v1
+    kind: HelmChartConfig
+    metadata:
+      name: rke2-calico
+      namespace: kube-system
+    spec:
+      valuesContent: |-
+        installation:
+          calicoNetwork:
+            mtu: 9000
+    ```
+
+    For more information about values available for the Calico chart, please refer to the [rke2-charts repository](https://github.com/rancher/rke2-charts/blob/main/charts/rke2-calico/rke2-calico/v3.24.102/values.yaml)
+
+    > **Note:** Calico requires the iptables or xtables-nft package  to be installed on the node.
+
+
+## Dual-stack configuration
+
+IPv4/IPv6 dual-stack networking enables the allocation of both IPv4 and IPv6 addresses to Pods and Services. It is supported in RKE2 since v1.21, stable since v1.23 but not activated by default. To activate it correctly, both RKE2 and the chosen CNI plugin must be configured accordingly. To configure RKE2 in dual-stack mode, in the control-plane nodes, you must set a valid IPv4/IPv6 dual-stack cidr for pods and services. Moreover, in both control-plane and worker nodes, you must set a dual-stack node-ip, which includes the IPv4 and IPv6 address of the node. To do so, use the flags `--cluster-cidr`, `--service-cidr` and `--node-ip` for example:
+
+```bash
+--cluster-cidr 10.42.0.0/16,2001:cafe:42:0::/56
+--service-cidr 10.43.0.0/16,2001:cafe:42:1::/112
+--node-ip 10.0.10.40,2001:d091:a6f:4691:58c6:8609:a6d5:d1c3
+```
+
+Each CNI plugin requires a different configuration for dual-stack:
+
+=== "Canal CNI plugin"
+
+    Canal automatically detects the RKE2 configuration for dual-stack and does not need any extra configuration. Dual-stack is currently not supported in the windows installations of RKE2.
+
+=== "Cilium CNI plugin"
+
+    Cilium automatically detects the RKE2 configuration for dual-stack and does not need any extra configuration.
+
+=== "Calico CNI plugin"
+
+    Calico automatically detects the RKE2 configuration for dual-stack and does not need any extra configuration. When deployed in dual-stack mode, it creates two different ippool resources. Note that when using dual-stack, calico leverages BGP instead of VXLAN encapsulation. Dual-stack and BGP are currently not supported in the windows installations of RKE2.
+
+
+## IPv6 setup
+
+In case of IPv6 only configuration RKE2 needs to use `localhost` to access the liveness URL of the ETCD pod; check that your operating system configures `/etc/hosts` file correctly:
+```bash
+::1       localhost
+```
+
+
+## Using Multus
+
+Starting with RKE2 v1.21 it is possible to deploy the Multus CNI meta-plugin. Note that this is for advanced users.
+
+[Multus CNI](https://github.com/k8snetworkplumbingwg/multus-cni) is a CNI plugin that enables attaching multiple network interfaces to pods. Multus does not replace CNI plugins, instead it acts as a CNI plugin multiplexer. Multus is useful in certain use cases, especially when pods are network intensive and require extra network interfaces that support dataplane acceleration techniques such as SR-IOV.
+
+Multus can not be deployed standalone. It always requires at least one conventional CNI plugin that fulfills the Kubernetes cluster network requirements. That CNI plugin becomes the default for Multus, and will be used to provide the primary interface for all pods.
+
+To enable Multus, pass `multus` as the first value to the `--cni` flag, followed by the name of the plugin you want to use alongside Multus (or `none` if you will provide your own default plugin). Note that multus must always be in the
+first position of the list. For example, to use Multus with `canal` as the default plugin you could specify `--cni=multus,canal` or `--cni=multus --cni=canal`.
+
+For more information about Multus, refer to the [multus-cni](https://github.com/k8snetworkplumbingwg/multus-cni/tree/master/docs) documentation.
+
+
+## Using Multus with Cilium
+
+To use Cilium with Multus the `exclusive` config needs to be disabled.
+You can do this by using the following HelmChartConfig:
 ```yaml
-"container_settings": {
-  "allow_ip_forwarding": true
-}
+# /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-cilium
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    cni:
+      exclusive: false
 ```
 
-Apply the Canal YAML.
 
-Ensure the settings were applied by running the following command on the host:
+## Using Multus with the containernetworking plugins
 
-```bash
-cat /etc/cni/net.d/10-canal.conflist
-```
+Any CNI plugin can be used as secondary CNI plugin for Multus to provide additional network interfaces attached to a pod. However, it is most common to use the CNI plugins maintained by the containernetworking team (bridge, host-device,
+macvlan, etc) as secondary CNI plugins for Multus. These containernetworking plugins are automatically deployed when installing Multus. For more information about these plugins, refer to the [containernetworking plugins](https://www.cni.dev/plugins/current) documentation.
 
-You should see that IP forwarding is set to true.
+To use any of these plugins, a proper NetworkAttachmentDefinition object will need to be created to define the configuration of the secondary network. The definition is then referenced by pod annotations, which Multus will use to provide extra interfaces to that pod. An example using the macvlan cni plugin with Mu is available [in the multus-cni repo](https://github.com/k8snetworkplumbingwg/multus-cni/blob/master/docs/quickstart.md#storing-a-configuration-as-a-custom-resource).
 
-</TabItem>
-<TabItem value="Calico" default>
+## Using Multus with the Whereabouts CNI
+[Whereabouts](https://github.com/k8snetworkplumbingwg/whereabouts) is an IP Address Management (IPAM) CNI plugin that assigns IP addresses cluster-wide.
+Starting with RKE2 1.22, RKE2 includes the option to use Whereabouts with Multus to manage the IP addresses of the additional interfaces created through Multus.
+In order to do this, you need to use [HelmChartConfig](../helm.md#customizing-packaged-components-with-helmchartconfig) to configure the Multus CNI to use Whereabouts.
 
-Follow the [Calico CNI Plugins Guide](https://docs.tigera.io/calico/latest/reference/configure-cni-plugins). Modify the Calico YAML so that IP forwarding is allowed in the `container_settings` section, for example:
-
+You can do this by using the following HelmChartConfig:
 ```yaml
-"container_settings": {
-  "allow_ip_forwarding": true
-}
+# /var/lib/rancher/rke2/server/manifests/rke2-multus-config.yaml
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-multus
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    rke2-whereabouts:
+      enabled: true
 ```
 
-Apply the Calico YAML.
+This will configure the chart for Multus to use `rke2-whereabouts` as a dependency.
 
-Ensure the settings were applied by running the following command on the host:
+If you want to customize the Whereabouts image, this is possible like this:
+```yaml
+# /var/lib/rancher/rke2/server/manifests/rke2-multus-config.yaml
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-multus
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    rke2-whereabouts:
+      enabled: true
+      image:
+        repository: ghcr.io/k8snetworkplumbingwg/whereabouts
+        tag: latest-amd64
+```
+
+NOTE: You should write this file before starting rke2.
+
+## Using Multus with SR-IOV (experimental)
+
+**Please note this is an experimental feature introduced with v1.21.2+rke2r1.**
+
+Using the SR-IOV CNI with Multus can help with data-plane acceleration use cases, providing an extra interface in the pod that can achieve very high throughput. SR-IOV will not work in all environments, and there are several requirements
+that must be fulfilled to consider the node as SR-IOV capable:
+
+* Physical NIC must support SR-IOV (e.g. by checking /sys/class/net/$NIC/device/sriov_totalvfs)
+* The host operating system must activate IOMMU virtualization
+* The host operating system includes drivers capable of doing sriov (e.g. i40e, vfio-pci, etc)
+
+The SR-IOV CNI plugin cannot be used as the default CNI plugin for Multus; it must be deployed alongside both Multus and a traditional CNI plugin. The SR-IOV CNI helm chart can be found in the `rancher-charts` Helm repo. For more information see [Rancher Helm Charts documentation](https://rancher.com/docs/rancher/v2.x/en/helm-charts/).
+
+After installing the SR-IOV CNI chart, the SR-IOV operator will be deployed. Then, the user must specify what nodes in the cluster are SR-IOV capable by labeling them with `feature.node.kubernetes.io/network-sriov.capable=true`:
 
 ```bash
-cat /etc/cni/net.d/10-calico.conflist
+kubectl label node $NODE-NAME feature.node.kubernetes.io/network-sriov.capable=true
 ```
 
-You should see that IP forwarding is set to true.
+Once labeled, the sriov-network-config Daemonset will deploy a pod to the node to collect information about the network interfaces. That information is available through the `sriovnetworknodestates` Custom Resource Definition. A couple of
+minutes after the deployment, there will be one `sriovnetworknodestates` resource per node, with the name of the node as the resource name.
 
-
-</TabItem>
-</Tabs>
-
-## Control-Plane Egress Selector configuration
-
-K3s agents and servers maintain websocket tunnels between nodes that are used to encapsulate bidirectional communication between the control-plane (apiserver) and agent (kubelet and containerd) components.
-This allows agents to operate without exposing the kubelet and container runtime streaming ports to incoming connections, and for the control-plane to connect to cluster services when operating with the agent disabled.
-This functionality is equivalent to the [Konnectivity](https://kubernetes.io/docs/tasks/extend-kubernetes/setup-konnectivity/) service commonly used on other Kubernetes distributions, and is managed via the apiserver's egress selector configuration.
-
-The egress selector mode may be configured on servers via the `--egress-selector-mode` flag, and offers four modes:
-* `disabled`: The apiserver does not use agent tunnels to communicate with kubelets or cluster endpoints.
-  This mode requires that servers run the kubelet, CNI, and kube-proxy, and have direct connectivity to agents, or the apiserver will not be able to access service endpoints or perform `kubectl exec` and `kubectl logs`.
-* `agent` (default): The apiserver uses agent tunnels to communicate with kubelets.
-  This mode requires that the servers also run the kubelet, CNI, and kube-proxy, or the apiserver will not be able to access service endpoints.
-* `pod`: The apiserver uses agent tunnels to communicate with kubelets and service endpoints, routing endpoint connections to the correct agent by watching Nodes.
-  **NOTE**: This will not work when using a CNI that uses its own IPAM and does not respect the node's PodCIDR allocation. `cluster` or `agent` should be used with these CNIs instead.
-* `cluster`: The apiserver uses agent tunnels to communicate with kubelets and service endpoints, routing endpoint connections to the correct agent by watching Endpoints.
-
-## Dual-stack (IPv4 + IPv6) Networking
-
-:::info Version Gate
-
-Experimental support is available as of [v1.21.0+k3s1](https://github.com/k3s-io/k3s/releases/tag/v1.21.0%2Bk3s1).  
-Stable support is available as of [v1.23.7+k3s1](https://github.com/k3s-io/k3s/releases/tag/v1.23.7%2Bk3s1). 
-
-:::
-
-:::caution Known Issue 
-
-Kubernetes [Issue #111695](https://github.com/kubernetes/kubernetes/issues/111695) causes the Kubelet to ignore the node IPv6 addresses if you have a dual-stack environment and you are not using the primary network interface for cluster traffic. To avoid this bug, add the following flag to both K3s servers and agents:
-
-```
---kubelet-arg="node-ip=0.0.0.0" # To proritize IPv4 traffic
-#OR
---kubelet-arg="node-ip=::" # To proritize IPv6 traffic
-```
-
-:::
-
-Dual-stack networking must be configured when the cluster is first created. It cannot be enabled on an existing cluster once it has been started as IPv4-only.
-
-To enable dual-stack in K3s, you must provide valid dual-stack `cluster-cidr` and `service-cidr` on all server nodes. This is an example of a valid configuration:
-
-```
---cluster-cidr=10.42.0.0/16,2001:cafe:42:0::/56 --service-cidr=10.43.0.0/16,2001:cafe:42:1::/112
-```
-
-Note that you may configure any valid `cluster-cidr` and `service-cidr` values, but the above masks are recommended. If you change the `cluster-cidr` mask, you should also change the `node-cidr-mask-size-ipv4` and `node-cidr-mask-size-ipv6` values to match the planned pods per node and total node count. The largest supported `service-cidr` mask is /12 for IPv4, and /112 for IPv6. Remember to allow ipv6 traffic if you are deploying in a public cloud.
-
-If you are using a custom CNI plugin, i.e. a CNI plugin other than Flannel, the additional configuration may be required. Please consult your plugin's dual-stack documentation and verify if network policies can be enabled.
-
-## Single-stack IPv6 Networking
-
-:::info Version Gate
-Available as of [v1.22.9+k3s1](https://github.com/k3s-io/k3s/releases/tag/v1.22.9%2Bk3s1)
-:::
-
-:::caution Known Issue
-If your IPv6 default route is set by a router advertisement (RA), you will need to set the sysctl `net.ipv6.conf.all.accept_ra=2`; otherwise, the node will drop the default route once it expires. Be aware that accepting RAs could increase the risk of [man-in-the-middle attacks](https://github.com/kubernetes/kubernetes/issues/91507).
-:::
-
-Single-stack IPv6 clusters (clusters without IPv4) are supported on K3s using the `--cluster-cidr` and `--service-cidr` flags. This is an example of a valid configuration:
-
-```bash
---cluster-cidr=2001:cafe:42:0::/56 --service-cidr=2001:cafe:42:1::/112
-```
-
-
-## Distributed hybrid or multicloud cluster
-
-A K3s cluster can still be deployed on nodes which use different private networks and are not directly connected (e.g. nodes in different public clouds). To achieve this, K3s sets a mesh of tunnels that become a VPN mesh. These nodes must have have an assigned IP through which they can be reached (e.g. a public IP). The server traffic will use a websocket tunnel and the data-plane traffic will use a wireguard tunnel.
-
-To enable this type of deployment, you must add the following parameters on servers:
-```bash
---node-external-ip=<SERVER_EXTERNAL_IP> --flannel-backend=wireguard-native --flannel-external-ip
-```
-and on agents:
-```bash
---node-external-ip=<AGENT_EXTERNAL_IP>
-```
-
-where `SERVER_EXTERNAL_IP` is the IP through which we can reach the server node and `AGENT_EXTERNAL_IP` is the IP through which we can reach the agent node. Note that the `K3S_URL` config parameter in the agent should use the `SERVER_EXTERNAL_IP` to be able to connect to it. Remember to check the [Networking Requirements](../installation/requirements.md#networking) and allow access to the listed ports on both internal and external addresses.
-
-Both `SERVER_EXTERNAL_IP` and `AGENT_EXTERNAL_IP` must have connectivity between them and are normally public IPs.
-
-:::info Dynamic IPs
-If nodes are assigned dynamic IPs and the IP changes (e.g. in AWS), you must modify the `--node-external-ip` parameter to reflect the new IP. If running k3s as a service, you must modify `/etc/systemd/system/k3s.service` then run:
-
-```bash
-systemctl daemon-reload
-systemctl restart k3s
-```
-:::
-
-:::caution Warning
-The latency between nodes will increase as external connectivity requires more hops. This will reduce the network performance and could also impact the health of the cluster if latency is too high.
-:::
-
-:::caution Warning
-Embedded etcd will not use external IPs for communication. If using embedded etcd; all server nodes must be reachable to each other via their private IPs.
-:::
-
+For more information about how to use the SR-IOV operator, please refer to [sriov-network-operator](https://github.com/k8snetworkplumbingwg/sriov-network-operator/blob/master/doc/quickstart.md#configuration)
