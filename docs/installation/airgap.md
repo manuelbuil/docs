@@ -2,7 +2,8 @@
 title: "Air-Gap Install"
 ---
 
-You can install K3s in an air-gapped environment using two different methods. An air-gapped environment is any environment that is not directly connected to the Internet. You can either deploy a private registry and mirror docker.io, or you can manually deploy images such as for small clusters.
+K3s can be installed in an air-gapped environment with two different methods. You can either deploy via the [k3s-airgap-images tarball release artifact](#manually-deploy-images-method) or by using a [private registry](#private-registry-method). It is also possible to install using the [embedded registry mirror](#embedded-registry-mirror) as long as there is another cluster member that includes the required images.
+
 
 ## Load Images
 
@@ -43,7 +44,7 @@ This method requires you to manually deploy the necessary images to each node, a
 ### Embedded Registry Mirror
 
 :::info Version Gate
-The Embedded Registry Mirror is available as an experimental feature as of January 2024 releases: v1.26.13+k3s1, v1.27.10+k3s1, v1.28.6+k3s1, v1.29.1+k3s1
+The Embedded Registry Mirror is available as an experimental feature as of January 2024 releases: v1.26.13+k3s1, v1.27.10+k3s1, v1.28.6+k3s1, v1.29.1+k3s1 and GA as of December 2024 releases: v1.29.12+k3s1, v1.30.8+k3s1, v1.31.4+k3s1
 :::
 
 K3s includes an embedded distributed OCI-compliant registry mirror.
